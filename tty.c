@@ -34,11 +34,6 @@
 
 static int	tty_log_fd = -1;
 
-static void	tty_init_termios(int, struct termios *, struct bufferevent *);
-
-static void	tty_read_callback(struct bufferevent *, void *);
-static void	tty_error_callback(struct bufferevent *, short, void *);
-
 static int	tty_client_ready(struct client *, struct window_pane *);
 
 static void	tty_set_italics(struct tty *);
@@ -159,6 +154,38 @@ tty_set_size(struct tty *tty, u_int sx, u_int sy)
 	return (1);
 }
 
+static void
+tty_read_callback(__unused int fd, __unused short events, void *data)
+{
+	struct tty	*tty = data;
+	size_t		 size = EVBUFFER_LENGTH(tty->in);
+	int		 nread;
+
+	nread = evbuffer_read(tty->in, tty->fd, -1);
+	if (nread == -1)
+		return;
+	log_debug("%s: read %d bytes (already %zu)", tty->path, nread, size);
+
+	while (tty_keys_next(tty))
+		;
+}
+
+static void
+tty_write_callback(__unused int fd, __unused short events, void *data)
+{
+	struct tty	*tty = data;
+	size_t		 size = EVBUFFER_LENGTH(tty->out);
+	int		 nwrite;
+
+	nwrite = evbuffer_write(tty->out, tty->fd);
+	if (nwrite == -1)
+		return;
+	log_debug("%s: wrote %d bytes (of %zu)", tty->path, nwrite, size);
+
+	if (EVBUFFER_LENGTH(tty->out) != 0)
+		event_add(&tty->event_out, NULL);
+}
+
 int
 tty_open(struct tty *tty, char **cause)
 {
@@ -169,10 +196,14 @@ tty_open(struct tty *tty, char **cause)
 	}
 	tty->flags |= TTY_OPENED;
 
-	tty->flags &= ~(TTY_NOCURSOR|TTY_FREEZE|TTY_TIMER);
+	tty->flags &= ~(TTY_NOCURSOR|TTY_FREEZE);
 
-	tty->event = bufferevent_new(tty->fd, tty_read_callback, NULL,
-	    tty_error_callback, tty);
+	event_set(&tty->event_in, tty->fd, EV_PERSIST|EV_READ,
+	    tty_read_callback, tty);
+	tty->in = evbuffer_new();
+
+	event_set(&tty->event_out, tty->fd, EV_WRITE, tty_write_callback, tty);
+	tty->out = evbuffer_new();
 
 	tty_start_tty(tty);
 
@@ -181,50 +212,26 @@ tty_open(struct tty *tty, char **cause)
 	return (0);
 }
 
-static void
-tty_read_callback(__unused struct bufferevent *bufev, void *data)
-{
-	struct tty	*tty = data;
-
-	while (tty_keys_next(tty))
-		;
-}
-
-static void
-tty_error_callback(__unused struct bufferevent *bufev, __unused short what,
-    __unused void *data)
-{
-}
-
-static void
-tty_init_termios(int fd, struct termios *orig_tio, struct bufferevent *bufev)
-{
-	struct termios	tio;
-
-	if (fd == -1 || tcgetattr(fd, orig_tio) != 0)
-		return;
-
-	setblocking(fd, 0);
-
-	if (bufev != NULL)
-		bufferevent_enable(bufev, EV_READ|EV_WRITE);
-
-	memcpy(&tio, orig_tio, sizeof tio);
-	tio.c_iflag &= ~(IXON|IXOFF|ICRNL|INLCR|IGNCR|IMAXBEL|ISTRIP);
-	tio.c_iflag |= IGNBRK;
-	tio.c_oflag &= ~(OPOST|ONLCR|OCRNL|ONLRET);
-	tio.c_lflag &= ~(IEXTEN|ICANON|ECHO|ECHOE|ECHONL|ECHOCTL|
-	    ECHOPRT|ECHOKE|ISIG);
-	tio.c_cc[VMIN] = 1;
-	tio.c_cc[VTIME] = 0;
-	if (tcsetattr(fd, TCSANOW, &tio) == 0)
-		tcflush(fd, TCIOFLUSH);
-}
-
 void
 tty_start_tty(struct tty *tty)
 {
-	tty_init_termios(tty->fd, &tty->tio, tty->event);
+	struct termios	tio;
+
+	if (tty->fd != -1 && tcgetattr(tty->fd, &tty->tio) == 0) {
+		setblocking(tty->fd, 0);
+		event_add(&tty->event_in, NULL);
+
+		memcpy(&tio, &tty->tio, sizeof tio);
+		tio.c_iflag &= ~(IXON|IXOFF|ICRNL|INLCR|IGNCR|IMAXBEL|ISTRIP);
+		tio.c_iflag |= IGNBRK;
+		tio.c_oflag &= ~(OPOST|ONLCR|OCRNL|ONLRET);
+		tio.c_lflag &= ~(IEXTEN|ICANON|ECHO|ECHOE|ECHONL|ECHOCTL|
+		    ECHOPRT|ECHOKE|ISIG);
+		tio.c_cc[VMIN] = 1;
+		tio.c_cc[VTIME] = 0;
+		if (tcsetattr(tty->fd, TCSANOW, &tio) == 0)
+			tcflush(tty->fd, TCIOFLUSH);
+	}
 
 	tty_putcode(tty, TTYC_SMCUP);
 
@@ -264,7 +271,8 @@ tty_stop_tty(struct tty *tty)
 		return;
 	tty->flags &= ~TTY_STARTED;
 
-	bufferevent_disable(tty->event, EV_READ|EV_WRITE);
+	event_del(&tty->event_in);
+	event_del(&tty->event_out);
 
 	/*
 	 * Be flexible about error handling and try not kill the server just
@@ -318,7 +326,10 @@ tty_close(struct tty *tty)
 	tty_stop_tty(tty);
 
 	if (tty->flags & TTY_OPENED) {
-		bufferevent_free(tty->event);
+		evbuffer_free(tty->in);
+		event_del(&tty->event_in);
+		evbuffer_free(tty->out);
+		event_del(&tty->event_out);
 
 		tty_term_free(tty->term);
 		tty_keys_free(tty);
@@ -411,11 +422,13 @@ tty_putcode_ptr2(struct tty *tty, enum tty_code_code code, const void *a,
 static void
 tty_add(struct tty *tty, const char *buf, size_t len)
 {
-	bufferevent_write(tty->event, buf, len);
-	log_debug("%s: %.*s", tty->path, (int)len, buf);
+	evbuffer_add(tty->out, buf, len);
+	log_debug("%s: %.*s", tty->path, (int)len, (const char *)buf);
 
 	if (tty_log_fd != -1)
 		write(tty_log_fd, buf, len);
+	if (tty->flags & TTY_STARTED)
+		event_add(&tty->event_out, NULL);
 }
 
 void
@@ -669,12 +682,12 @@ void
 tty_draw_line(struct tty *tty, const struct window_pane *wp,
     struct screen *s, u_int py, u_int ox, u_int oy)
 {
-	struct grid_cell	 gc, tmp_gc;
-	struct grid_line	*gl;
-	u_int			 i, sx;
-	int			 flags;
+	struct grid_cell	 gc, last;
+	u_int			 i, j, sx, width;
+	int			 flags = (tty->flags & TTY_NOCURSOR);
+	char			 buf[512];
+	size_t			 len;
 
-	flags = tty->flags & TTY_NOCURSOR;
 	tty->flags |= TTY_NOCURSOR;
 	tty_update_mode(tty, tty->mode, s);
 
@@ -682,30 +695,50 @@ tty_draw_line(struct tty *tty, const struct window_pane *wp,
 	tty_margin_off(tty);
 
 	sx = screen_size_x(s);
-	if (sx > s->grid->linedata[s->grid->hsize + py].cellsize)
-		sx = s->grid->linedata[s->grid->hsize + py].cellsize;
+	if (sx > s->grid->linedata[s->grid->hsize + py].cellused)
+		sx = s->grid->linedata[s->grid->hsize + py].cellused;
 	if (sx > tty->sx)
 		sx = tty->sx;
 
-	/*
-	 * Don't move the cursor to the start position if it will wrap there
-	 * itself.
-	 */
-	gl = NULL;
-	if (py != 0)
-		gl = &s->grid->linedata[s->grid->hsize + py - 1];
-	if (oy + py == 0 || gl == NULL || !(gl->flags & GRID_LINE_WRAPPED) ||
-	    tty->cx < tty->sx || ox != 0 ||
-	    (oy + py != tty->cy + 1 && tty->cy != s->rlower + oy))
-		tty_cursor(tty, ox, oy + py);
+	tty_cursor(tty, ox, oy + py);
+
+	memcpy(&last, &grid_default_cell, sizeof last);
+	len = 0;
+	width = 0;
 
 	for (i = 0; i < sx; i++) {
 		grid_view_get_cell(s->grid, i, py, &gc);
-		if (gc.flags & GRID_FLAG_SELECTED) {
-			screen_select_cell(s, &tmp_gc, &gc);
-			tty_cell(tty, &tmp_gc, wp);
-		} else
-			tty_cell(tty, &gc, wp);
+		if (len != 0 &&
+		    (gc.attr & GRID_ATTR_CHARSET ||
+		    gc.flags != last.flags ||
+		    gc.attr != last.attr ||
+		    gc.fg != last.fg ||
+		    gc.bg != last.bg ||
+		    (sizeof buf) - len < gc.data.size)) {
+			tty_attributes(tty, &last, wp);
+			tty_putn(tty, buf, len, width);
+
+			len = 0;
+			width = 0;
+		}
+
+		if (gc.flags & GRID_FLAG_SELECTED)
+			screen_select_cell(s, &last, &gc);
+		else
+			memcpy(&last, &gc, sizeof last);
+		if (gc.attr & GRID_ATTR_CHARSET) {
+			tty_attributes(tty, &last, wp);
+			for (j = 0; j < gc.data.size; j++)
+				tty_putc(tty, gc.data.data[j]);
+		} else {
+			memcpy(buf + len, gc.data.data, gc.data.size);
+			len += gc.data.size;
+			width += gc.data.width;
+		}
+	}
+	if (len != 0) {
+		tty_attributes(tty, &last, wp);
+		tty_putn(tty, buf, len, width);
 	}
 
 	if (sx < tty->sx) {
@@ -730,7 +763,7 @@ tty_client_ready(struct client *c, struct window_pane *wp)
 {
 	if (c->session == NULL || c->tty.term == NULL)
 		return (0);
-	if (c->flags & CLIENT_SUSPENDED)
+	if (c->flags & (CLIENT_REDRAW|CLIENT_SUSPENDED))
 		return (0);
 	if (c->tty.flags & TTY_FREEZE)
 		return (0);
@@ -1018,6 +1051,7 @@ tty_cmd_clearendofscreen(struct tty *tty, const struct tty_ctx *ctx)
 	tty_margin_off(tty);
 
 	if (tty_pane_full_width(tty, ctx) &&
+	    ctx->yoff + wp->sy >= tty->sy - 1 &&
 	    status_at_line(tty->client) <= 0 &&
 	    tty_term_has(tty->term, TTYC_ED)) {
 		tty_cursor_pane(tty, ctx, ctx->ocx, ctx->ocy);
@@ -1307,7 +1341,7 @@ tty_region(struct tty *tty, u_int rupper, u_int rlower)
 		tty_cursor(tty, 0, tty->cy);
 
 	tty_putcode2(tty, TTYC_CSR, tty->rupper, tty->rlower);
-	tty->cx = tty->cy = 0;
+	tty->cx = tty->cy = UINT_MAX;
 }
 
 /* Turn off margin. */
@@ -1345,7 +1379,7 @@ tty_margin(struct tty *tty, u_int rleft, u_int rright)
 	else
 		snprintf(s, sizeof s, "\033[%u;%us", rleft + 1, rright + 1);
 	tty_puts(tty, s);
-	tty->cx = tty->cy = 0;
+	tty->cx = tty->cy = UINT_MAX;
 }
 
 /* Move cursor inside pane. */

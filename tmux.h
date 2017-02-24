@@ -245,9 +245,6 @@ enum tty_code_code {
 	TTYC_IL1,	/* insert_line, il */
 	TTYC_INDN,      /* parm_index, indn */
 	TTYC_INVIS,	/* enter_secure_mode, mk */
-	TTYC_IS1,	/* init_1string, i1 */
-	TTYC_IS2,	/* init_2string, i2 */
-	TTYC_IS3,	/* init_3string, i3 */
 	TTYC_KCBT,	/* key_btab, kB */
 	TTYC_KCUB1,	/* key_left, kl */
 	TTYC_KCUD1,	/* key_down, kd */
@@ -903,11 +900,12 @@ struct environ_entry {
 
 /* Client session. */
 struct session_group {
-	TAILQ_HEAD(, session) sessions;
+	const char		*name;
+	TAILQ_HEAD(, session)	 sessions;
 
-	TAILQ_ENTRY(session_group) entry;
+	RB_ENTRY(session_group)	 entry;
 };
-TAILQ_HEAD(session_groups, session_group);
+RB_HEAD(session_groups, session_group);
 
 struct session {
 	u_int		 id;
@@ -1042,7 +1040,10 @@ struct tty {
 	u_int		 rright;
 
 	int		 fd;
-	struct bufferevent *event;
+	struct event	 event_in;
+	struct evbuffer	*in;
+	struct event	 event_out;
+	struct evbuffer	*out;
 
 	struct termios	 tio;
 
@@ -1832,6 +1833,8 @@ void	 server_client_push_stdout(struct client *);
 void	 server_client_push_stderr(struct client *);
 void printflike(2, 3) server_client_add_message(struct client *, const char *,
 	     ...);
+char	*server_client_get_path(struct client *, const char *);
+const char *server_client_get_cwd(struct client *);
 
 /* server-fn.c */
 void	 server_fill_environ(struct session *, struct environ *);
@@ -2212,13 +2215,15 @@ extern struct sessions sessions;
 extern struct session_groups session_groups;
 int	session_cmp(struct session *, struct session *);
 RB_PROTOTYPE(sessions, session, entry, session_cmp);
+int	session_group_cmp(struct session_group *, struct session_group *);
+RB_PROTOTYPE(session_groups, session_group, entry, session_group_cmp);
 int		 session_alive(struct session *);
 struct session	*session_find(const char *);
 struct session	*session_find_by_id_str(const char *);
 struct session	*session_find_by_id(u_int);
-struct session	*session_create(const char *, int, char **, const char *,
-		     const char *, struct environ *, struct termios *, int,
-		     u_int, u_int, char **);
+struct session	*session_create(const char *, const char *, int, char **,
+		     const char *, const char *, struct environ *,
+		     struct termios *, int, u_int, u_int, char **);
 void		 session_destroy(struct session *);
 void		 session_unref(struct session *);
 int		 session_check_name(const char *);
@@ -2237,9 +2242,10 @@ int		 session_previous(struct session *, int);
 int		 session_select(struct session *, int);
 int		 session_last(struct session *);
 int		 session_set_current(struct session *, struct winlink *);
-struct session_group *session_group_find(struct session *);
-u_int		 session_group_index(struct session_group *);
-void		 session_group_add(struct session *, struct session *);
+struct session_group *session_group_contains(struct session *);
+struct session_group *session_group_find(const char *);
+struct session_group *session_group_new(const char *);
+void		 session_group_add(struct session_group *, struct session *);
 void		 session_group_synchronize_to(struct session *);
 void		 session_group_synchronize_from(struct session *);
 void		 session_renumber_windows(struct session *);
