@@ -204,6 +204,9 @@ endif
 if NO_IMSG
 nodist_tmux_SOURCES += compat/imsg.c compat/imsg-buffer.c
 endif
+if NO_ERR_H
+nodist_tmux_SOURCES += compat/err.c
+endif
 if NO_CLOSEFROM
 nodist_tmux_SOURCES += compat/closefrom.c
 endif
@@ -224,6 +227,12 @@ nodist_tmux_SOURCES += compat/strlcat.c
 endif
 if NO_STRLCPY
 nodist_tmux_SOURCES += compat/strlcpy.c
+endif
+if NO_STRNLEN
+nodist_tmux_SOURCES += compat/strnlen.c
+endif
+if NO_STRNDUP
+nodist_tmux_SOURCES += compat/strndup.c
 endif
 if NO_ASPRINTF
 nodist_tmux_SOURCES += compat/asprintf.c

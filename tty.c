@@ -41,6 +41,8 @@ static int	tty_try_colour(struct tty *, int, const char *);
 static void	tty_force_cursor_colour(struct tty *, const char *);
 static void	tty_cursor_pane(struct tty *, const struct tty_ctx *, u_int,
 		    u_int);
+static void	tty_cursor_pane_unless_wrap(struct tty *,
+		    const struct tty_ctx *, u_int, u_int);
 static void	tty_invalidate(struct tty *);
 static void	tty_colours(struct tty *, const struct grid_cell *);
 static void	tty_check_fg(struct tty *, const struct window_pane *,
@@ -235,7 +237,7 @@ tty_start_tty(struct tty *tty)
 
 	tty_putcode(tty, TTYC_SMCUP);
 
-	tty_putcode(tty, TTYC_RMKX);
+	tty_putcode(tty, TTYC_SMKX);
 	if (tty_use_acs(tty))
 		tty_putcode(tty, TTYC_ENACS);
 	tty_putcode(tty, TTYC_CLEAR);
@@ -474,7 +476,10 @@ void
 tty_putn(struct tty *tty, const void *buf, size_t len, u_int width)
 {
 	tty_add(tty, buf, len);
-	tty->cx += width;
+	if (tty->cx + width > tty->sx)
+		tty->cx = tty->cy = UINT_MAX;
+	else
+		tty->cx += width;
 }
 
 static void
@@ -572,12 +577,6 @@ tty_update_mode(struct tty *tty, int mode, struct screen *s)
 				tty_puts(tty, "\033[?1000l");
 			tty_puts(tty, "\033[?1006l");
 		}
-	}
-	if (changed & MODE_KKEYPAD) {
-		if (mode & MODE_KKEYPAD)
-			tty_putcode(tty, TTYC_SMKX);
-		else
-			tty_putcode(tty, TTYC_RMKX);
 	}
 	if (changed & MODE_BRACKETPASTE) {
 		if (mode & MODE_BRACKETPASTE)
@@ -709,7 +708,11 @@ tty_draw_line(struct tty *tty, const struct window_pane *wp,
 	for (i = 0; i < sx; i++) {
 		grid_view_get_cell(s->grid, i, py, &gc);
 		if (len != 0 &&
-		    (gc.attr & GRID_ATTR_CHARSET ||
+		    (((~tty->flags & TTY_UTF8) &&
+		    (gc.data.size != 1 ||
+		    *gc.data.data >= 0x7f ||
+		    gc.data.width != 1)) ||
+		    (gc.attr & GRID_ATTR_CHARSET) ||
 		    gc.flags != last.flags ||
 		    gc.attr != last.attr ||
 		    gc.fg != last.fg ||
@@ -726,10 +729,19 @@ tty_draw_line(struct tty *tty, const struct window_pane *wp,
 			screen_select_cell(s, &last, &gc);
 		else
 			memcpy(&last, &gc, sizeof last);
-		if (gc.attr & GRID_ATTR_CHARSET) {
+		if (((~tty->flags & TTY_UTF8) &&
+		    (gc.data.size != 1 ||
+		    *gc.data.data >= 0x7f ||
+		    gc.data.width != 1)) ||
+		    (gc.attr & GRID_ATTR_CHARSET)) {
 			tty_attributes(tty, &last, wp);
-			for (j = 0; j < gc.data.size; j++)
-				tty_putc(tty, gc.data.data[j]);
+			if (~tty->flags & TTY_UTF8) {
+				for (j = 0; j < gc.data.width; j++)
+					tty_putc(tty, '_');
+			} else {
+				for (j = 0; j < gc.data.size; j++)
+					tty_putc(tty, gc.data.data[j]);
+			}
 		} else {
 			memcpy(buf + len, gc.data.data, gc.data.size);
 			len += gc.data.size;
@@ -1181,7 +1193,7 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 			tty_margin_off(tty);
 	}
 
-	tty_cursor_pane(tty, ctx, ctx->ocx, ctx->ocy);
+	tty_cursor_pane_unless_wrap(tty, ctx, ctx->ocx, ctx->ocy);
 
 	tty_cell(tty, ctx->cell, ctx->wp);
 }
@@ -1189,7 +1201,7 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 void
 tty_cmd_cells(struct tty *tty, const struct tty_ctx *ctx)
 {
-	tty_cursor_pane(tty, ctx, ctx->ocx, ctx->ocy);
+	tty_cursor_pane_unless_wrap(tty, ctx, ctx->ocx, ctx->ocy);
 
 	tty_attributes(tty, ctx->cell, ctx->wp);
 	tty_putn(tty, ctx->ptr, ctx->num, ctx->num);
@@ -1380,6 +1392,25 @@ tty_margin(struct tty *tty, u_int rleft, u_int rright)
 		snprintf(s, sizeof s, "\033[%u;%us", rleft + 1, rright + 1);
 	tty_puts(tty, s);
 	tty->cx = tty->cy = UINT_MAX;
+}
+
+/*
+ * Move the cursor, unless it would wrap itself when the next character is
+ * printed.
+ */
+static void
+tty_cursor_pane_unless_wrap(struct tty *tty, const struct tty_ctx *ctx,
+    u_int cx, u_int cy)
+{
+	if (!tty_pane_full_width(tty, ctx) ||
+	    (tty->term->flags & TERM_EARLYWRAP) ||
+	    ctx->xoff + cx != 0 ||
+	    ctx->yoff + cy != tty->cy + 1 ||
+	    tty->cx < tty->sx ||
+	    tty->cy == tty->rlower)
+		tty_cursor_pane(tty, ctx, cx, cy);
+	else
+		log_debug("%s: will wrap at %u,%u", __func__, tty->cx, tty->cy);
 }
 
 /* Move cursor inside pane. */

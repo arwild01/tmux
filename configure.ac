@@ -189,11 +189,19 @@ if test "x$found_ncurses" = xyes; then
 else
 	# pkg-config didn't work, try ncurses.
 	AC_CHECK_LIB(
-		[tinfo ncurses],
+		tinfo,
 		setupterm,
 		found_ncurses=yes,
 		found_ncurses=no
 	)
+	if test "x$found_ncurses" = xno; then
+		AC_CHECK_LIB(
+			ncurses,
+			setupterm,
+			found_ncurses=yes,
+			found_ncurses=no
+		)
+	fi
 	if test "x$found_ncurses" = xyes; then
 		AC_CHECK_HEADER(
 			ncurses.h,
@@ -350,6 +358,16 @@ if test "x$found_cmsg_data" = xno; then
 fi
 AC_SUBST(XOPEN_DEFINES)
 
+# Look for err and friends in err.h.
+AC_CHECK_FUNC(err, found_err_h=yes, found_err_h=no)
+AC_CHECK_FUNC(errx, , found_err_h=no)
+AC_CHECK_FUNC(warn, , found_err_h=no)
+AC_CHECK_FUNC(warnx, , found_err_h=no)
+if test "x$found_err_h" = xyes; then
+	AC_CHECK_HEADER(err.h, , found_err_h=no)
+fi
+AM_CONDITIONAL(NO_ERR_H, [test "x$found_err_h" = xno])
+
 # Look for imsg in libutil. compat/imsg.c is linked by Makefile.am if missing.
 AC_SEARCH_LIBS(imsg_init, util, found_imsg_init=yes, found_imsg_init=no)
 if test "x$found_imsg_init" = xyes; then
@@ -412,6 +430,20 @@ if test "x$found_strlcat" = xyes; then
 	AC_DEFINE(HAVE_STRLCAT)
 fi
 AM_CONDITIONAL(NO_STRLCAT, [test "x$found_strlcat" = xno])
+
+# Look for strnlen, compat/strnlen.c used if missing.
+AC_CHECK_FUNC(strnlen, found_strnlen=yes, found_strnlen=no)
+if test "x$found_strnlen" = xyes; then
+	AC_DEFINE(HAVE_STRNLEN)
+fi
+AM_CONDITIONAL(NO_STRNLEN, [test "x$found_strnlen" = xno])
+
+# Look for strndup, compat/strndup.c used if missing.
+AC_CHECK_FUNC(strndup, found_strndup=yes, found_strndup=no)
+if test "x$found_strndup" = xyes; then
+	AC_DEFINE(HAVE_STRNDUP)
+fi
+AM_CONDITIONAL(NO_STRNDUP, [test "x$found_strndup" = xno])
 
 # Look for asprintf, compat/asprintf.c used if missing.
 AC_CHECK_FUNC(asprintf, found_asprintf=yes, found_asprintf=no)
@@ -583,9 +615,9 @@ AC_LINK_IFELSE([AC_LANG_SOURCE(
 AC_MSG_CHECKING(for program_invocation_short_name)
 AC_LINK_IFELSE([AC_LANG_SOURCE(
 	[
+		#include <errno.h>
 		#include <stdio.h>
 		#include <stdlib.h>
-		extern char *program_invocation_short_name;
 		int main(void) {
 			const char *cp = program_invocation_short_name;
 			printf("%s\n", cp);
