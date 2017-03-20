@@ -961,6 +961,7 @@ server_client_loop(void)
 	}
 }
 
+/* Resize timer event. */
 static void
 server_client_resize_event(__unused int fd, __unused short events, void *data)
 {
@@ -1230,7 +1231,7 @@ server_client_set_title(struct client *c)
 
 	template = options_get_string(s->options, "set-titles-string");
 
-	ft = format_create(NULL, 0);
+	ft = format_create(NULL, FORMAT_NONE, 0);
 	format_defaults(ft, c, NULL, NULL, NULL);
 
 	title = format_expand_time(ft, template, time(NULL));
@@ -1634,4 +1635,64 @@ server_client_push_stderr(struct client *c)
 		event_once(-1, EV_TIMEOUT, server_client_stderr_cb, c, NULL);
 		log_debug("%s: client %p, queued", __func__, c);
 	}
+}
+
+/* Add to client message log. */
+void
+server_client_add_message(struct client *c, const char *fmt, ...)
+{
+	struct message_entry	*msg, *msg1;
+	char			*s;
+	va_list			 ap;
+	u_int			 limit;
+
+	va_start(ap, fmt);
+	xvasprintf(&s, fmt, ap);
+	va_end(ap);
+
+	log_debug("%s: message %s", c->tty.path, s);
+
+	msg = xcalloc(1, sizeof *msg);
+	msg->msg_time = time(NULL);
+	msg->msg_num = c->message_next++;
+	msg->msg = s;
+	TAILQ_INSERT_TAIL(&c->message_log, msg, entry);
+
+	limit = options_get_number(global_options, "message-limit");
+	TAILQ_FOREACH_SAFE(msg, &c->message_log, entry, msg1) {
+		if (msg->msg_num + limit >= c->message_next)
+			break;
+		free(msg->msg);
+		TAILQ_REMOVE(&c->message_log, msg, entry);
+		free(msg);
+	}
+}
+
+/* Get client working directory. */
+const char *
+server_client_get_cwd(struct client *c)
+{
+	struct session	*s;
+
+	if (c != NULL && c->session == NULL && c->cwd != NULL)
+		return (c->cwd);
+	if (c != NULL && (s = c->session) != NULL && s->cwd != NULL)
+		return (s->cwd);
+	return (".");
+}
+
+/* Resolve an absolute path or relative to client working directory. */
+char *
+server_client_get_path(struct client *c, const char *file)
+{
+	char	*path, resolved[PATH_MAX];
+
+	if (*file == '/')
+		path = xstrdup(file);
+	else
+		xasprintf(&path, "%s/%s", server_client_get_cwd(c), file);
+	if (realpath(path, resolved) == NULL)
+		return (path);
+	free(path);
+	return (xstrdup(resolved));
 }

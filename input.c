@@ -87,6 +87,7 @@ struct input_ctx {
 	struct utf8_data	utf8data;
 
 	int			ch;
+
 	int			flags;
 #define INPUT_DISCARD 0x1
 
@@ -221,6 +222,7 @@ enum input_csi_type {
 	INPUT_CSI_SGR,
 	INPUT_CSI_SM,
 	INPUT_CSI_SM_PRIVATE,
+	INPUT_CSI_SU,
 	INPUT_CSI_TBC,
 	INPUT_CSI_VPA,
 	INPUT_CSI_WINOPS,
@@ -242,6 +244,7 @@ static const struct input_table_entry input_csi_table[] = {
 	{ 'L', "",  INPUT_CSI_IL },
 	{ 'M', "",  INPUT_CSI_DL },
 	{ 'P', "",  INPUT_CSI_DCH },
+	{ 'S', "",  INPUT_CSI_SU },
 	{ 'X', "",  INPUT_CSI_ECH },
 	{ 'Z', "",  INPUT_CSI_CBT },
 	{ 'c', "",  INPUT_CSI_DA },
@@ -871,8 +874,9 @@ input_parse(struct window_pane *wp)
 
 	buf = EVBUFFER_DATA(evb);
 	len = EVBUFFER_LENGTH(evb);
-	notify_input(wp, evb);
 	off = 0;
+
+	notify_input(wp, evb);
 
 	log_debug("%s: %%%u %s, %zu bytes: %.*s", __func__, wp->id,
 	    ictx->state->name, len, (int)len, buf);
@@ -892,6 +896,16 @@ input_parse(struct window_pane *wp)
 			/* No transition? Eh? */
 			fatalx("no transition from state");
 		}
+
+		/*
+		 * Any state except print stops the current collection. This is
+		 * an optimization to avoid checking if the attributes have
+		 * changed for every character. It will stop unnecessarily for
+		 * sequences that don't make a terminal change, but they should
+		 * be the minority.
+		 */
+		if (itr->handler != input_print)
+			screen_write_collect_end(&ictx->ctx);
 
 		/*
 		 * Execute the handler, if any. Don't switch state if it
@@ -918,7 +932,6 @@ input_parse(struct window_pane *wp)
 /* Split the parameter list (if any). */
 static int
 input_split(struct input_ctx *ictx)
-
 {
 	const char	*errstr;
 	char		*ptr, *out;
@@ -1019,7 +1032,7 @@ input_print(struct input_ctx *ictx)
 		ictx->cell.cell.attr &= ~GRID_ATTR_CHARSET;
 
 	utf8_set(&ictx->cell.cell.data, ictx->ch);
-	screen_write_cell(&ictx->ctx, &ictx->cell.cell);
+	screen_write_collect_add(&ictx->ctx, &ictx->cell.cell);
 
 	ictx->cell.cell.attr &= ~GRID_ATTR_CHARSET;
 
@@ -1218,10 +1231,12 @@ input_csi_dispatch(struct input_ctx *ictx)
 
 	if (ictx->flags & INPUT_DISCARD)
 		return (0);
-	if (input_split(ictx) != 0)
-		return (0);
+
 	log_debug("%s: '%c' \"%s\" \"%s\"",
 	    __func__, ictx->ch, ictx->interm_buf, ictx->param_buf);
+
+	if (input_split(ictx) != 0)
+		return (0);
 
 	entry = bsearch(ictx, input_csi_table, nitems(input_csi_table),
 	    sizeof input_csi_table[0], input_table_compare);
@@ -1327,7 +1342,7 @@ input_csi_dispatch(struct input_ctx *ictx)
 			screen_write_clearendofscreen(sctx, ictx->cell.cell.bg);
 			break;
 		case 1:
-			screen_write_clearstartofscreen(sctx);
+			screen_write_clearstartofscreen(sctx, ictx->cell.cell.bg);
 			break;
 		case 2:
 			screen_write_clearscreen(sctx, ictx->cell.cell.bg);
@@ -1374,7 +1389,7 @@ input_csi_dispatch(struct input_ctx *ictx)
 		break;
 	case INPUT_CSI_IL:
 		screen_write_insertline(sctx, input_get(ictx, 0, 1, 1),
-			ictx->cell.cell.bg);
+		    ictx->cell.cell.bg);
 		break;
 	case INPUT_CSI_RCP:
 		memcpy(&ictx->cell, &ictx->old_cell, sizeof ictx->cell);
@@ -1399,6 +1414,9 @@ input_csi_dispatch(struct input_ctx *ictx)
 		break;
 	case INPUT_CSI_SM_PRIVATE:
 		input_csi_dispatch_sm_private(ictx);
+		break;
+	case INPUT_CSI_SU:
+		screen_write_scrollup(sctx, input_get(ictx, 0, 1, 1));
 		break;
 	case INPUT_CSI_TBC:
 		switch (input_get(ictx, 0, 0, 0)) {
@@ -1760,6 +1778,9 @@ input_csi_dispatch_sgr(struct input_ctx *ictx)
 			break;
 		case 27:
 			gc->attr &= ~GRID_ATTR_REVERSE;
+			break;
+		case 28:
+			gc->attr &= ~GRID_ATTR_HIDDEN;
 			break;
 		case 30:
 		case 31:

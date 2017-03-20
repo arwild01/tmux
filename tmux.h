@@ -66,18 +66,8 @@ struct tmuxproc;
 /* Automatic name refresh interval, in microseconds. Must be < 1 second. */
 #define NAME_INTERVAL 500000
 
-/*
- * Event watermarks. We start with FAST then if we hit full size for HITS reads
- * in succession switch to SLOW, and return when we hit EMPTY the same number
- * of times.
- */
-#define READ_FAST_SIZE 4096
-#define READ_SLOW_SIZE 128
-
-#define READ_FULL_SIZE (4096 - 16)
-#define READ_EMPTY_SIZE 16
-
-#define READ_CHANGE_HITS 3
+/* Maximum size of data to hold from a pane. */
+#define READ_SIZE 4096
 
 /* Attribute to make GCC check printf-like arguments. */
 #define printflike(a, b) __attribute__ ((format (printf, a, b)))
@@ -242,6 +232,7 @@ enum tty_code_code {
 	TTYC_DL1,	/* delete_line, dl */
 	TTYC_E3,
 	TTYC_ECH,	/* erase_chars, ec */
+	TTYC_ED,	/* clr_eos, cd */
 	TTYC_EL,	/* clr_eol, ce */
 	TTYC_EL1,	/* clr_bol, cb */
 	TTYC_ENACS,	/* ena_acs, eA */
@@ -252,10 +243,8 @@ enum tty_code_code {
 	TTYC_ICH1,	/* insert_character, ic */
 	TTYC_IL,	/* parm_insert_line, IL */
 	TTYC_IL1,	/* insert_line, il */
+	TTYC_INDN,      /* parm_index, indn */
 	TTYC_INVIS,	/* enter_secure_mode, mk */
-	TTYC_IS1,	/* init_1string, i1 */
-	TTYC_IS2,	/* init_2string, i2 */
-	TTYC_IS3,	/* init_3string, i3 */
 	TTYC_KCBT,	/* key_btab, kB */
 	TTYC_KCUB1,	/* key_left, kl */
 	TTYC_KCUD1,	/* key_down, kd */
@@ -493,6 +482,7 @@ struct msg_stderr_data {
 #define MODE_FOCUSON 0x800
 #define MODE_MOUSE_ALL 0x1000
 
+#define ALL_MODES 0xffffff
 #define ALL_MOUSE_MODES (MODE_MOUSE_STANDARD|MODE_MOUSE_BUTTON|MODE_MOUSE_ALL)
 
 /*
@@ -547,7 +537,6 @@ struct grid_cell {
 	int			fg;
 	int			bg;
 	struct utf8_data	data;
-
 };
 struct grid_cell_entry {
 	u_char			flags;
@@ -663,17 +652,19 @@ struct screen {
 
 	bitstr_t		*tabs;
 
-	bitstr_t		*dirty;
-	u_int			 dirtysize;
-
 	struct screen_sel	 sel;
 };
 
 /* Screen write context. */
+struct screen_write_collect_item;
+struct screen_write_collect_line;
 struct screen_write_ctx {
 	struct window_pane	*wp;
 	struct screen		*s;
-	u_int			 dirty;
+
+	struct screen_write_collect_item *item;
+	struct screen_write_collect_line *list;
+	u_int			 scrolled;
 
 	u_int			 cells;
 	u_int			 written;
@@ -763,9 +754,6 @@ struct window_pane {
 	struct bufferevent *event;
 
 	struct event	 resize_timer;
-
-	u_int		 wmark_size;
-	u_int		 wmark_hits;
 
 	struct input_ctx *ictx;
 
@@ -912,11 +900,12 @@ struct environ_entry {
 
 /* Client session. */
 struct session_group {
-	TAILQ_HEAD(, session) sessions;
+	const char		*name;
+	TAILQ_HEAD(, session)	 sessions;
 
-	TAILQ_ENTRY(session_group) entry;
+	RB_ENTRY(session_group)	 entry;
 };
-TAILQ_HEAD(session_groups, session_group);
+RB_HEAD(session_groups, session_group);
 
 struct session {
 	u_int		 id;
@@ -937,6 +926,8 @@ struct session {
 	struct winlink	*curw;
 	struct winlink_stack lastw;
 	struct winlinks	 windows;
+
+	int		 statusat;
 
 	struct hooks	*hooks;
 	struct options	*options;
@@ -1049,11 +1040,17 @@ struct tty {
 	u_int		 rright;
 
 	int		 fd;
-	struct bufferevent *event;
+	struct event	 event_in;
+	struct evbuffer	*in;
+	struct event	 event_out;
+	struct evbuffer	*out;
 
 	struct termios	 tio;
 
 	struct grid_cell cell;
+
+	int		 last_wp;
+	struct grid_cell last_cell;
 
 #define TTY_NOCURSOR 0x1
 #define TTY_FREEZE 0x2
@@ -1092,9 +1089,9 @@ struct tty {
 
 /* TTY command context. */
 struct tty_ctx {
-	struct window_pane *wp;
+	struct window_pane	*wp;
 
-	const struct grid_cell *cell;
+	const struct grid_cell	*cell;
 
 	u_int		 num;
 	void		*ptr;
@@ -1115,9 +1112,6 @@ struct tty_ctx {
 
 	/* The background colour used for clearing (erasing). */
 	u_int		 bg;
-
-	/* Saved last cell on line. */
-	struct grid_cell last_cell;
 };
 
 /* Saved message entry. */
@@ -1227,6 +1221,7 @@ struct cmdq_item {
 
 	struct cmd_list		*cmdlist;
 	struct cmd		*cmd;
+	int			 repeat;
 
 	cmdq_cb			 cb;
 	void			*data;
@@ -1505,8 +1500,11 @@ char		*paste_make_sample(struct paste_buffer *);
 #define FORMAT_STATUS 0x1
 #define FORMAT_FORCE 0x2
 #define FORMAT_NOJOBS 0x4
+#define FORMAT_NONE 0
+#define FORMAT_PANE 0x80000000U
+#define FORMAT_WINDOW 0x40000000U
 struct format_tree;
-struct format_tree *format_create(struct cmdq_item *, int);
+struct format_tree *format_create(struct cmdq_item *, int, int);
 void		 format_free(struct format_tree *);
 void printflike(3, 4) format_add(struct format_tree *, const char *,
 		     const char *, ...);
@@ -1652,6 +1650,7 @@ void	tty_write(void (*)(struct tty *, const struct tty_ctx *),
 	    struct tty_ctx *);
 void	tty_cmd_alignmenttest(struct tty *, const struct tty_ctx *);
 void	tty_cmd_cell(struct tty *, const struct tty_ctx *);
+void	tty_cmd_cells(struct tty *, const struct tty_ctx *);
 void	tty_cmd_clearendofline(struct tty *, const struct tty_ctx *);
 void	tty_cmd_clearendofscreen(struct tty *, const struct tty_ctx *);
 void	tty_cmd_clearline(struct tty *, const struct tty_ctx *);
@@ -1665,7 +1664,7 @@ void	tty_cmd_erasecharacter(struct tty *, const struct tty_ctx *);
 void	tty_cmd_insertcharacter(struct tty *, const struct tty_ctx *);
 void	tty_cmd_insertline(struct tty *, const struct tty_ctx *);
 void	tty_cmd_linefeed(struct tty *, const struct tty_ctx *);
-void	tty_cmd_utf8character(struct tty *, const struct tty_ctx *);
+void	tty_cmd_scrollup(struct tty *, const struct tty_ctx *);
 void	tty_cmd_reverseindex(struct tty *, const struct tty_ctx *);
 void	tty_cmd_setselection(struct tty *, const struct tty_ctx *);
 void	tty_cmd_rawstring(struct tty *, const struct tty_ctx *);
@@ -1832,6 +1831,10 @@ void	 server_client_exec(struct client *, const char *);
 void	 server_client_loop(void);
 void	 server_client_push_stdout(struct client *);
 void	 server_client_push_stderr(struct client *);
+void printflike(2, 3) server_client_add_message(struct client *, const char *,
+	     ...);
+char	*server_client_get_path(struct client *, const char *);
+const char *server_client_get_cwd(struct client *);
 
 /* server-fn.c */
 void	 server_fill_environ(struct session *, struct environ *);
@@ -1863,6 +1866,7 @@ void	 server_unzoom_window(struct window *);
 /* status.c */
 void	 status_timer_start(struct client *);
 void	 status_timer_start_all(void);
+void	 status_update_saved(struct session *s);
 int	 status_at_line(struct client *);
 struct window *status_get_window_at(struct client *, u_int);
 int	 status_redraw(struct client *);
@@ -1920,6 +1924,8 @@ void	 grid_clear_history(struct grid *);
 const struct grid_line *grid_peek_line(struct grid *, u_int);
 void	 grid_get_cell(struct grid *, u_int, u_int, struct grid_cell *);
 void	 grid_set_cell(struct grid *, u_int, u_int, const struct grid_cell *);
+void	 grid_set_cells(struct grid *, u_int, u_int, const struct grid_cell *,
+	     const char *, size_t);
 void	 grid_clear(struct grid *, u_int, u_int, u_int, u_int, u_int);
 void	 grid_clear_lines(struct grid *, u_int, u_int, u_int);
 void	 grid_move_lines(struct grid *, u_int, u_int, u_int, u_int);
@@ -1934,6 +1940,8 @@ u_int	 grid_reflow(struct grid *, struct grid *, u_int);
 void	 grid_view_get_cell(struct grid *, u_int, u_int, struct grid_cell *);
 void	 grid_view_set_cell(struct grid *, u_int, u_int,
 	     const struct grid_cell *);
+void	 grid_view_set_cells(struct grid *, u_int, u_int,
+	     const struct grid_cell *, const char *, size_t);
 void	 grid_view_clear_history(struct grid *, u_int);
 void	 grid_view_clear(struct grid *, u_int, u_int, u_int, u_int, u_int);
 void	 grid_view_scroll_region_up(struct grid *, u_int, u_int);
@@ -1987,11 +1995,15 @@ void	 screen_write_cursormove(struct screen_write_ctx *, u_int, u_int);
 void	 screen_write_reverseindex(struct screen_write_ctx *);
 void	 screen_write_scrollregion(struct screen_write_ctx *, u_int, u_int);
 void	 screen_write_linefeed(struct screen_write_ctx *, int);
+void	 screen_write_scrollup(struct screen_write_ctx *, u_int);
 void	 screen_write_carriagereturn(struct screen_write_ctx *);
 void	 screen_write_clearendofscreen(struct screen_write_ctx *, u_int);
-void	 screen_write_clearstartofscreen(struct screen_write_ctx *);
+void	 screen_write_clearstartofscreen(struct screen_write_ctx *, u_int);
 void	 screen_write_clearscreen(struct screen_write_ctx *, u_int);
 void	 screen_write_clearhistory(struct screen_write_ctx *);
+void	 screen_write_collect_end(struct screen_write_ctx *);
+void	 screen_write_collect_add(struct screen_write_ctx *,
+	     const struct grid_cell *);
 void	 screen_write_cell(struct screen_write_ctx *, const struct grid_cell *);
 void	 screen_write_setselection(struct screen_write_ctx *, u_char *, u_int);
 void	 screen_write_rawstring(struct screen_write_ctx *, u_char *, u_int);
@@ -2203,13 +2215,15 @@ extern struct sessions sessions;
 extern struct session_groups session_groups;
 int	session_cmp(struct session *, struct session *);
 RB_PROTOTYPE(sessions, session, entry, session_cmp);
+int	session_group_cmp(struct session_group *, struct session_group *);
+RB_PROTOTYPE(session_groups, session_group, entry, session_group_cmp);
 int		 session_alive(struct session *);
 struct session	*session_find(const char *);
 struct session	*session_find_by_id_str(const char *);
 struct session	*session_find_by_id(u_int);
-struct session	*session_create(const char *, int, char **, const char *,
-		     const char *, struct environ *, struct termios *, int,
-		     u_int, u_int, char **);
+struct session	*session_create(const char *, const char *, int, char **,
+		     const char *, const char *, struct environ *,
+		     struct termios *, int, u_int, u_int, char **);
 void		 session_destroy(struct session *);
 void		 session_unref(struct session *);
 int		 session_check_name(const char *);
@@ -2228,9 +2242,10 @@ int		 session_previous(struct session *, int);
 int		 session_select(struct session *, int);
 int		 session_last(struct session *);
 int		 session_set_current(struct session *, struct winlink *);
-struct session_group *session_group_find(struct session *);
-u_int		 session_group_index(struct session_group *);
-void		 session_group_add(struct session *, struct session *);
+struct session_group *session_group_contains(struct session *);
+struct session_group *session_group_find(const char *);
+struct session_group *session_group_new(const char *);
+void		 session_group_add(struct session_group *, struct session *);
 void		 session_group_synchronize_to(struct session *);
 void		 session_group_synchronize_from(struct session *);
 void		 session_renumber_windows(struct session *);

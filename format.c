@@ -81,6 +81,7 @@ static void	 format_defaults_winlink(struct format_tree *, struct session *,
 
 /* Entry in format job tree. */
 struct format_job {
+	u_int			 tag;
 	const char		*cmd;
 	const char		*expanded;
 
@@ -103,6 +104,10 @@ RB_GENERATE_STATIC(format_job_tree, format_job, entry, format_job_cmp);
 static int
 format_job_cmp(struct format_job *fj1, struct format_job *fj2)
 {
+	if (fj1->tag < fj2->tag)
+		return (-1);
+	if (fj1->tag > fj2->tag)
+		return (1);
 	return (strcmp(fj1->cmd, fj2->cmd));
 }
 
@@ -127,6 +132,7 @@ struct format_tree {
 	struct session		*s;
 	struct window_pane	*wp;
 
+	u_int			 tag;
 	int			 flags;
 
 	RB_HEAD(format_entry_tree, format_entry) tree;
@@ -242,9 +248,11 @@ format_job_get(struct format_tree *ft, const char *cmd)
 	char			*expanded;
 	int			 force;
 
+	fj0.tag = ft->tag;
 	fj0.cmd = cmd;
 	if ((fj = RB_FIND(format_job_tree, &format_jobs, &fj0)) == NULL) {
 		fj = xcalloc(1, sizeof *fj);
+		fj->tag = ft->tag;
 		fj->cmd = xstrdup(cmd);
 		fj->expanded = NULL;
 
@@ -516,7 +524,7 @@ format_merge(struct format_tree *ft, struct format_tree *from)
 
 /* Create a new tree. */
 struct format_tree *
-format_create(struct cmdq_item *item, int flags)
+format_create(struct cmdq_item *item, int tag, int flags)
 {
 	struct format_tree	*ft;
 
@@ -527,6 +535,8 @@ format_create(struct cmdq_item *item, int flags)
 
 	ft = xcalloc(1, sizeof *ft);
 	RB_INIT(&ft->tree);
+
+	ft->tag = tag;
 	ft->flags = flags;
 
 	format_add(ft, "version", "%s", VERSION);
@@ -869,9 +879,8 @@ format_replace(struct format_tree *ft, const char *key, size_t keylen,
 		*ptr = '\0';
 
 		found = format_find(ft, copy + 1, modifiers);
-		if (found == NULL) {
-			log_debug("XXX %s", copy + 1);
-			found = format_expand(ft, copy + 1);}
+		if (found == NULL)
+			found = format_expand(ft, copy + 1);
 		if (format_choose(ptr + 1, &left, &right) != 0)
 			goto fail;
 
@@ -1108,10 +1117,10 @@ format_defaults_session(struct format_tree *ft, struct session *s)
 	format_add(ft, "session_height", "%u", s->sy);
 	format_add(ft, "session_id", "$%u", s->id);
 
-	sg = session_group_find(s);
+	sg = session_group_contains(s);
 	format_add(ft, "session_grouped", "%d", sg != NULL);
 	if (sg != NULL)
-		format_add(ft, "session_group", "%u", session_group_index(sg));
+		format_add(ft, "session_group", "%s", sg->name);
 
 	format_add_tv(ft, "session_created", &s->creation_time);
 	format_add_tv(ft, "session_last_attached", &s->last_attached_time);

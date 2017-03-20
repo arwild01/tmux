@@ -72,7 +72,7 @@ cmd_set_option_exec(struct cmd *self, struct cmdq_item *item)
 	struct cmd_find_state		*fs = &item->state.tflag;
 	struct session			*s = fs->s;
 	struct winlink			*wl = fs->wl;
-	struct window			*w = wl->window;
+	struct window			*w;
 	struct client			*c;
 	enum options_table_scope	 scope;
 	struct options			*oo;
@@ -248,6 +248,8 @@ cmd_set_option_exec(struct cmd *self, struct cmdq_item *item)
 		RB_FOREACH(w, windows, &windows)
 			layout_fix_panes(w, w->sx, w->sy);
 	}
+	RB_FOREACH (s, sessions, &sessions)
+		status_update_saved(s);
 
 	/*
 	 * Update sizes and redraw. May not always be necessary but do it

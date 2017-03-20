@@ -77,7 +77,7 @@ cmd_attach_session(struct cmdq_item *item, int dflag, int rflag,
 	}
 
 	if (cflag != NULL) {
-		ft = format_create(item, 0);
+		ft = format_create(item, FORMAT_NONE, 0);
 		format_defaults(ft, c, s, wl, wp);
 		cwd = format_expand(ft, cflag);
 		format_free(ft);
@@ -98,6 +98,8 @@ cmd_attach_session(struct cmdq_item *item, int dflag, int rflag,
 			environ_update(s->options, c->environ, s->environ);
 
 		c->session = s;
+		if (!item->repeat)
+			server_client_set_key_table(c, NULL);
 		status_timer_start(c);
 		notify_client("client-session-changed", c);
 		session_update_activity(s, NULL);
