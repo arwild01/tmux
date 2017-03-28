@@ -22,6 +22,7 @@
 
 #include <limits.h>
 #include <stdio.h>
+#include <termios.h>
 #include <wchar.h>
 
 #ifndef __GNUC__
@@ -55,6 +56,15 @@ typedef uint8_t u_int8_t;
 typedef uint16_t u_int16_t;
 typedef uint32_t u_int32_t;
 typedef uint64_t u_int64_t;
+#endif
+
+#ifdef HAVE_ERR_H
+#include <err.h>
+#else
+void	err(int, const char *, ...);
+void	errx(int, const char *, ...);
+void	warn(const char *, ...);
+void	warnx(const char *, ...);
 #endif
 
 #ifndef HAVE_PATHS_H
@@ -235,6 +245,16 @@ size_t	 	 strlcpy(char *, const char *, size_t);
 #ifndef HAVE_STRLCAT
 /* strlcat.c */
 size_t	 	 strlcat(char *, const char *, size_t);
+#endif
+
+#ifndef HAVE_STRNLEN
+/* strnlen.c */
+size_t		 strnlen(const char *, size_t);
+#endif
+
+#ifndef HAVE_STRNDUP
+/* strndup.c */
+char		*strndup(const char *, size_t);
 #endif
 
 #ifndef HAVE_DAEMON
